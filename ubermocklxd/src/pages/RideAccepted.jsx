@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import axios from "axios";
-import { MapContainer, TileLayer, Marker, useMap } from "react-leaflet";
-import L from "leaflet";
-import "leaflet/dist/leaflet.css";
+import { GoogleMap, Marker, Polyline, useJsApiLoader } from "@react-google-maps/api";
 
 const API_BASE_URL = "https://ubermockendpoint.soratechsol.com";
 const API_KEY = "184652892934764538576";
+const GOOGLE_MAPS_API_KEY =
+  (typeof window !== "undefined" && window.localStorage.getItem("ubermock_google_maps_api_key")) ||
+  "";
 const POLL_INTERVAL_MS = 5000;
 const TRACK_PATH_BUILDERS = [
   (id) => `/uberfake/api/simulation/${id}/location`,
@@ -77,9 +78,7 @@ function useRideTracking(ride) {
 
         if (cancelled) return;
         const data = res.data || {};
-        const liveLocation = data.currentLocation
-          ? [data.currentLocation.lat, data.currentLocation.lng]
-          : null;
+        const liveLocation = toValidCoordPair(data.currentLocation);
         setTracking({
           driverDistanceKm: data.driverDistanceKm ?? data.distanceKm ?? mockDistRef.current,
           pickupEtaMinutes: data.pickupEtaMinutes ?? data.etaMinutes ?? tracking?.pickupEtaMinutes,
@@ -138,55 +137,169 @@ function calcDriverCoord(lat, lon, distKm, bearing) {
   return [lat + latOff, lon + lonOff];
 }
 
-const PIN_ICON = L.divIcon({
-  html: `<span style="font-size:32px;line-height:1;display:block;filter:drop-shadow(0 2px 4px rgba(0,0,0,.6))">&#128205;</span>`,
-  className: "",
-  iconSize: [32, 32],
-  iconAnchor: [16, 32],
-});
+function toValidCoordPair(input) {
+  if (!input) return null;
 
-function makeCarIcon(bearingRad) {
-  const cssRot = ((bearingRad * 180) / Math.PI + 90) % 360;
-  return L.divIcon({
-    html: `<span style="font-size:28px;line-height:1;display:block;transform:rotate(${cssRot}deg);filter:drop-shadow(0 2px 4px rgba(0,0,0,.8))">&#128663;</span>`,
-    className: "",
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-  });
-}
+  if (Array.isArray(input) && input.length >= 2) {
+    const lat = Number(input[0]);
+    const lng = Number(input[1]);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return [lat, lng];
+  }
 
-function FitBoundsOnce({ pos1, pos2 }) {
-  const map = useMap();
-  const done = useRef(false);
-  useEffect(() => {
-    if (done.current) return;
-    map.fitBounds(L.latLngBounds([pos1, pos2]), { padding: [60, 60], maxZoom: 15 });
-    done.current = true;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const lat = Number(input.lat ?? input.latitude);
+  const lng = Number(input.lng ?? input.lon ?? input.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) return [lat, lng];
+
+  if (Array.isArray(input.coordinates) && input.coordinates.length >= 2) {
+    const coordLng = Number(input.coordinates[0]);
+    const coordLat = Number(input.coordinates[1]);
+    if (Number.isFinite(coordLat) && Number.isFinite(coordLng)) return [coordLat, coordLng];
+  }
+
   return null;
 }
 
 function RideMap({ pickupCoord, driverCoord, bearing }) {
-  const carIcon = useMemo(() => makeCarIcon(bearing), [bearing]);
+  const safePickup = toValidCoordPair(pickupCoord);
+  const safeDriver = toValidCoordPair(driverCoord);
+  const carHeading = ((bearing * 180) / Math.PI + 90) % 360;
+  const { isLoaded, loadError } = useJsApiLoader({
+    id: "ubermock-google-maps",
+    googleMapsApiKey: GOOGLE_MAPS_API_KEY,
+  });
+
+  if (!safePickup || !safeDriver) {
+    return (
+      <div className="flex h-[320px] w-full items-center justify-center bg-slate-900 text-sm text-slate-400">
+        Map unavailable. Tracking data is still updating.
+      </div>
+    );
+  }
+
+  if (!GOOGLE_MAPS_API_KEY || loadError || !isLoaded) {
+    return <RideMapFallback safePickup={safePickup} safeDriver={safeDriver} bearing={bearing} />;
+  }
+
+  const pickupPoint = { lat: safePickup[0], lng: safePickup[1] };
+  const driverPoint = { lat: safeDriver[0], lng: safeDriver[1] };
 
   return (
-    <MapContainer
-      center={pickupCoord}
-      zoom={14}
-      scrollWheelZoom={false}
-      style={{ height: "320px", width: "100%", borderRadius: "0.5rem" }}
+    <GoogleMap
+      mapContainerStyle={{ height: "320px", width: "100%" }}
+      center={pickupPoint}
+      zoom={13}
+      options={{
+        streetViewControl: false,
+        mapTypeControl: false,
+        fullscreenControl: false,
+      }}
+      onLoad={(map) => {
+        const bounds = new window.google.maps.LatLngBounds();
+        bounds.extend(pickupPoint);
+        bounds.extend(driverPoint);
+        map.fitBounds(bounds, 64);
+      }}
     >
-      <TileLayer
-        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-        attribution="&copy; <a href='https://openstreetmap.org/copyright'>OpenStreetMap</a> contributors &copy; <a href='https://carto.com/attributions'>CARTO</a>"
-        subdomains="abcd"
-        maxZoom={19}
+      <Marker position={pickupPoint} label="P" />
+      <Marker
+        position={driverPoint}
+        label="D"
+        icon={{
+          path: window.google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+          scale: 5,
+          fillColor: "#14b8a6",
+          fillOpacity: 1,
+          strokeColor: "#042f2e",
+          strokeWeight: 1,
+          rotation: carHeading,
+        }}
       />
-      <Marker position={pickupCoord} icon={PIN_ICON} />
-      <Marker position={driverCoord} icon={carIcon} />
-      <FitBoundsOnce pos1={pickupCoord} pos2={driverCoord} />
-    </MapContainer>
+      <Polyline
+        path={[driverPoint, pickupPoint]}
+        options={{
+          strokeColor: "#10b981",
+          strokeOpacity: 0.9,
+          strokeWeight: 4,
+        }}
+      />
+    </GoogleMap>
+  );
+}
+
+function RideMapFallback({ safePickup, safeDriver, bearing }) {
+  const carHeading = ((bearing * 180) / Math.PI + 90) % 360;
+
+  const minLat = Math.min(safePickup[0], safeDriver[0]);
+  const maxLat = Math.max(safePickup[0], safeDriver[0]);
+  const minLng = Math.min(safePickup[1], safeDriver[1]);
+  const maxLng = Math.max(safePickup[1], safeDriver[1]);
+
+  const latPad = Math.max((maxLat - minLat) * 0.25, 0.002);
+  const lngPad = Math.max((maxLng - minLng) * 0.25, 0.002);
+
+  const mapMinLat = minLat - latPad;
+  const mapMaxLat = maxLat + latPad;
+  const mapMinLng = minLng - lngPad;
+  const mapMaxLng = maxLng + lngPad;
+
+  const latSpan = Math.max(mapMaxLat - mapMinLat, 0.00001);
+  const lngSpan = Math.max(mapMaxLng - mapMinLng, 0.00001);
+
+  const toPoint = (coord) => {
+    const lat = Number(coord[0]);
+    const lng = Number(coord[1]);
+    const x = ((lng - mapMinLng) / lngSpan) * 100;
+    const y = (1 - (lat - mapMinLat) / latSpan) * 100;
+    return {
+      x: Math.min(96, Math.max(4, x)),
+      y: Math.min(96, Math.max(4, y)),
+    };
+  };
+
+  const pickupPoint = toPoint(safePickup);
+  const driverPoint = toPoint(safeDriver);
+  const dx = pickupPoint.x - driverPoint.x;
+  const dy = pickupPoint.y - driverPoint.y;
+  const routeLength = Math.sqrt(dx * dx + dy * dy);
+  const routeAngle = (Math.atan2(dy, dx) * 180) / Math.PI;
+  return (
+    <div className="relative h-[320px] w-full overflow-hidden bg-slate-950">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(16,185,129,0.18),transparent_35%),radial-gradient(circle_at_80%_80%,rgba(56,189,248,0.16),transparent_32%)]" />
+      <div className="absolute inset-0 opacity-30 [background-size:28px_28px] [background-image:linear-gradient(to_right,rgba(148,163,184,0.2)_1px,transparent_1px),linear-gradient(to_bottom,rgba(148,163,184,0.2)_1px,transparent_1px)]" />
+      {!GOOGLE_MAPS_API_KEY && (
+        <p className="absolute left-3 top-3 rounded bg-slate-900/80 px-2 py-1 text-[10px] text-slate-300">
+          Add VITE_GOOGLE_MAPS_API_KEY to use Google Maps
+        </p>
+      )}
+
+      <div
+        className="absolute h-[2px] origin-left bg-emerald-400/80"
+        style={{
+          left: `${driverPoint.x}%`,
+          top: `${driverPoint.y}%`,
+          width: `${routeLength}%`,
+          transform: `rotate(${routeAngle}deg)`,
+        }}
+      />
+
+      <div
+        className="absolute -translate-x-1/2 -translate-y-1/2 text-3xl drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]"
+        style={{ left: `${pickupPoint.x}%`, top: `${pickupPoint.y}%` }}
+      >
+        &#128205;
+      </div>
+
+      <div
+        className="absolute -translate-x-1/2 -translate-y-1/2 text-2xl drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]"
+        style={{
+          left: `${driverPoint.x}%`,
+          top: `${driverPoint.y}%`,
+          transform: `translate(-50%, -50%) rotate(${carHeading}deg)`,
+        }}
+      >
+        &#128663;
+      </div>
+    </div>
   );
 }
 
@@ -219,7 +332,8 @@ export default function RideAccepted() {
     [ride?.id]
   );
   const driverCoord = useMemo(() => {
-    if (tracking?.currentLocation) return tracking.currentLocation;
+    const live = toValidCoordPair(tracking?.currentLocation);
+    if (live) return live;
     const dist = tracking?.driverDistanceKm ?? ride?.driverDistanceKm ?? 1.5;
     return calcDriverCoord(pickupCoord[0], pickupCoord[1], dist, bearing);
     // eslint-disable-next-line react-hooks/exhaustive-deps

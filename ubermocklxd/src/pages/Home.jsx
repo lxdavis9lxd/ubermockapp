@@ -260,49 +260,54 @@ export default function Home() {
     setBookingState("booking");
     setApiError("");
 
-    if (apiMode === "mock") {
+    try {
+      if (apiMode === "mock") {
+        const bookingId = `UBR-${Date.now()}`;
+        const acceptedRide = createAcceptedRide(bookingId);
+        setHistory((prev) => [acceptedRide, ...prev]);
+        toast.success("Ride booked (mock mode).");
+        openRideAcceptedPage(acceptedRide);
+        return;
+      }
+
+      const auth = await ensureAuthToken();
+      if (!auth.success) {
+        const bookingId = `UBR-${Date.now()}`;
+        const acceptedRide = createAcceptedRide(bookingId);
+        setHistory((prev) => [acceptedRide, ...prev]);
+        switchToMockMode(auth.error || "API authentication failed. Booking saved in local mock mode.");
+        toast.error("API auth failed. Booking saved in mock mode.");
+        openRideAcceptedPage(acceptedRide);
+        return;
+      }
+
+      const payload = buildRideRequestPayload();
+      const response = await postWithFallback(BOOK_PATHS, payload);
+
+      const bookingId = response.success
+        ? response.data?.ride?._id || response.data?.bookingId || `UBR-${Date.now()}`
+        : `UBR-${Date.now()}`;
+
+      if (!response.success) {
+        switchToMockMode(response.error || "Booking endpoint error. Switched to local mock mode.");
+        toast.error("Endpoint unavailable. Booking saved in mock mode.");
+      } else {
+        toast.success("Ride booked.");
+      }
+
+      const acceptedRide = createAcceptedRide(bookingId, response.data);
+      setHistory((prev) => [acceptedRide, ...prev]);
+      openRideAcceptedPage(acceptedRide);
+    } catch (error) {
       const bookingId = `UBR-${Date.now()}`;
       const acceptedRide = createAcceptedRide(bookingId);
       setHistory((prev) => [acceptedRide, ...prev]);
-      setBookingState("idle");
-      toast.success("Ride booked (mock mode).");
+      switchToMockMode(error?.message || "Unexpected booking error. Saved in local mock mode.");
+      toast.error("Booking failed unexpectedly. Saved in mock mode.");
       openRideAcceptedPage(acceptedRide);
-      return;
-    }
-
-    const auth = await ensureAuthToken();
-    if (!auth.success) {
-      const bookingId = `UBR-${Date.now()}`;
-      const acceptedRide = createAcceptedRide(bookingId);
-      setHistory((prev) => [acceptedRide, ...prev]);
+    } finally {
       setBookingState("idle");
-      switchToMockMode(auth.error || "API authentication failed. Booking saved in local mock mode.");
-      toast.error("API auth failed. Booking saved in mock mode.");
-      openRideAcceptedPage(acceptedRide);
-      return;
     }
-
-    const payload = buildRideRequestPayload();
-
-    const response = await postWithFallback(BOOK_PATHS, payload);
-
-    const bookingId = response.success
-      ? response.data?.ride?._id || response.data?.bookingId || `UBR-${Date.now()}`
-      : `UBR-${Date.now()}`;
-
-    if (!response.success) {
-      switchToMockMode(response.error || "Booking endpoint error. Switched to local mock mode.");
-      toast.error("Endpoint unavailable. Booking saved in mock mode.");
-    } else {
-      toast.success("Ride booked.");
-    }
-
-    const acceptedRide = createAcceptedRide(bookingId, response.data);
-
-    setHistory((prev) => [acceptedRide, ...prev]);
-
-    setBookingState("idle");
-    openRideAcceptedPage(acceptedRide);
   };
 
   return (
